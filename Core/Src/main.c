@@ -49,8 +49,8 @@ UART_HandleTypeDef huart2;
 static const uint8_t GAUGE_ADDR=0x64<<1;
 static const uint8_t CTRL_REG=0x01; //register
 static const uint8_t AUTO_MODE=0xC0; //data
-static const uint8_t VOLT_REG=0x08;
-static const uint8_t AMP_REG=0x0E;
+static const uint8_t VOLT_REG=0x07;
+static const uint8_t AMP_REG=0x0D;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -148,7 +148,6 @@ int main(void)
 	//VOLTAGE READ ->
 	bufRx16=read_register(VOLT_REG);
 
-	//voltage=70.8*(65535-bufRx16)/65535;
 	voltage=70.8*bufRx16/65535;
 
 	sprintf((char*)msg,"Voltage=%f\r\n",voltage);
@@ -158,7 +157,7 @@ int main(void)
 
 	//CURRENT READ ->
 	bufRx16=read_register(AMP_REG);
-	current=6.4*(bufRx16-32767)/32767;
+	current=1000*6.4*(bufRx16-32767)/32767;
 	sprintf((char*)msg,"Current=%f\r\n",current);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
 	HAL_Delay(500);
@@ -209,8 +208,16 @@ HAL_StatusTypeDef Read_Register(uint8_t register_pointer, uint8_t* receive_buffe
 
 uint16_t read_register(uint8_t register_pointer)
 {
+	HAL_StatusTypeDef ret;
 	uint16_t return_value=0;
-	HAL_I2C_Mem_Read(&hi2c1,GAUGE_ADDR,(uint16_t)register_pointer,I2C_MEMADD_SIZE_8BIT,&return_value,2,HAL_MAX_DELAY);
+	uint8_t msg[20];
+
+	ret=HAL_I2C_Mem_Read(&hi2c1,(uint16_t)GAUGE_ADDR,(uint16_t)register_pointer,I2C_MEMADD_SIZE_8BIT,&return_value,2,HAL_MAX_DELAY);
+	if (ret!=HAL_OK)
+	{
+		strcpy((char*)msg,"Read Error.\r\n");
+		HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	}
 	return return_value;
 }
 
