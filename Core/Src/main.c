@@ -48,9 +48,13 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 static const uint8_t GAUGE_ADDR=0x64<<1;
 static const uint8_t CTRL_REG=0x01; //register
-static const uint8_t AUTO_MODE=0xC0; //data
+static const uint8_t AUTO_MODE=0xE8; //data + prescaler à 1024
+static const uint8_t SHUTDOWN=0xE9; //shutdown au registre B sans écraser
 static const uint8_t VOLT_REG=0x07;
 static const uint8_t AMP_REG=0x0D;
+static const uint8_t COUL_REG_MSB=0x02;
+static const uint8_t COUL_REG_LSB=0x03;
+static const float DeltaQ=0.00085;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,6 +66,7 @@ HAL_StatusTypeDef Write_Register16(uint8_t register_pointer, uint16_t register_v
 HAL_StatusTypeDef Write_Register8(uint8_t register_pointer, uint8_t register_value);
 HAL_StatusTypeDef Read_Register(uint8_t register_pointer, uint8_t* receive_buffer,int num_reg);
 uint16_t read_register(uint8_t register_pointer);
+void SetSOC(uint8_t valMSB,uint8_t valLSB);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -81,6 +86,7 @@ int main(void)
 	HAL_StatusTypeDef ret;
 	float voltage;
 	float current;
+	float SOC;
 	uint8_t bufRx[3];
 	uint16_t bufRx16;
 	uint8_t msg[50];
@@ -114,7 +120,7 @@ int main(void)
   }
 
 
-  ret=Write_Register8(CTRL_REG,AUTO_MODE); //I2C Master Transmit
+  	ret=Write_Register8(CTRL_REG,AUTO_MODE); //I2C Master Transmit
   	if (ret!=HAL_OK)
   	{
   		strcpy((char*)msg,"Control Register Automatic Mode Error.\r\n");
@@ -134,7 +140,23 @@ int main(void)
   			HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
   		}
   	}
+
+  	SetSOC(0xEF,0x44); //Valeur init à 15Ah ; Calcul : [Valeur/DeltaQ]_16 /!\ ATTENTION IL FAUT INVERSER MSB ET LSB : par exemple pour 0x44EF il faut mettre 0xEF et 0x44
   	HAL_Delay(500);
+
+
+  	bufRx16=read_register(COUL_REG_MSB);
+  	SOC=bufRx16*DeltaQ;
+  	sprintf((char*)msg,"Init SOC=%f",SOC);
+  	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+  	HAL_Delay(50);
+  	strcpy((char*)msg," Ah\r\n");
+  	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+  	HAL_Delay(1000);
+
+
+
+
 
   /* USER CODE END 2 */
 
@@ -147,24 +169,34 @@ int main(void)
 
 	//VOLTAGE READ ->
 	bufRx16=read_register(VOLT_REG);
-
 	voltage=70.8*bufRx16/65535;
 
 	sprintf((char*)msg,"Voltage=%f\r\n",voltage);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
-	HAL_Delay(500);
+	HAL_Delay(50);
 
 
 	//CURRENT READ ->
 	bufRx16=read_register(AMP_REG);
-	current=1000*6.4*(bufRx16-32767)/32767;
+	current=64*(bufRx16-32767)/(32767*5);
 	sprintf((char*)msg,"Current=%f\r\n",current);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	HAL_Delay(50);
+
+
+	//SOC
+	bufRx16=read_register(COUL_REG_MSB);
+	SOC=bufRx16*DeltaQ;
+	sprintf((char*)msg,"SOC=%f",SOC);
+	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	HAL_Delay(50);
+	strcpy((char*)msg," Ah\r\n");
+	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	HAL_Delay(50);
+
+	strcpy((char*)msg,"\r\n");
+	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
 	HAL_Delay(500);
-
-
-
-
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -175,10 +207,48 @@ int main(void)
 
 
 
+void SetSOC(uint8_t valMSB,uint8_t valLSB)
+{
+	HAL_StatusTypeDef ret;
+	uint8_t msg[50];
 
+	ret=Write_Register8(CTRL_REG,SHUTDOWN);
+	if (ret==HAL_OK)
+	{
+		HAL_Delay(100);
+		ret=Write_Register8(COUL_REG_MSB,valMSB);
+		ret=Write_Register8(COUL_REG_LSB,valLSB);
+		if (ret==HAL_OK)
+		{
+			HAL_Delay(100);
+			ret=Write_Register8(CTRL_REG,AUTO_MODE);
+			if (ret==HAL_OK)
+			{
+				HAL_Delay(100);
+				strcpy((char*)msg,"Setting Previous SOC Success.\r\n");
+				HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+			}
+			else
+			{
+				strcpy((char*)msg,"Control Register Still Shutdown.\r\n");
+				HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+			}
+		}
+		else
+		{
+			strcpy((char*)msg,"ERROR: not setting previous SOC value.\r\n");
+			HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+		}
+	}
+	else
+	{
+		strcpy((char*)msg,"Control Register Not Shutdown - Retry.\r\n");
+		HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	}
+}
 
-
-HAL_StatusTypeDef Write_Register16(uint8_t register_pointer, uint16_t register_value) //A faire en + : ajouter le medium I2C en choix
+//A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL
+HAL_StatusTypeDef Write_Register16(uint8_t register_pointer, uint16_t register_value) //A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL
 {
 	uint8_t data[3];
 	data[0]=register_pointer;
@@ -198,7 +268,7 @@ HAL_StatusTypeDef Write_Register8(uint8_t register_pointer, uint8_t register_val
 	return HAL_I2C_Master_Transmit(&hi2c1,GAUGE_ADDR,data,2,HAL_MAX_DELAY);
 }
 
-
+//A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL
 HAL_StatusTypeDef Read_Register(uint8_t register_pointer, uint8_t* receive_buffer,int num_reg) //num_reg est le nombre d'octet à récupérer (généralement 1 ou 2)
 {
 	HAL_I2C_Master_Transmit(&hi2c1, GAUGE_ADDR, &register_pointer,1,HAL_MAX_DELAY);
