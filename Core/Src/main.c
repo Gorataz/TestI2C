@@ -48,13 +48,15 @@ UART_HandleTypeDef huart2;
 /* USER CODE BEGIN PV */
 static const uint8_t GAUGE_ADDR=0x64<<1;
 static const uint8_t CTRL_REG=0x01; //register
-static const uint8_t AUTO_MODE=0xE8; //data + prescaler à 1024
-static const uint8_t SHUTDOWN=0xE9; //shutdown au registre B sans écraser
-static const uint8_t VOLT_REG=0x07;
-static const uint8_t AMP_REG=0x0D;
+static const uint8_t AUTO_MODE=0xF8; //data + prescaler à 1024
+static const uint8_t SHUTDOWN=0xF9; //shutdown au registre B sans écraser
+static const uint8_t VOLT_REG_MSB=0x08;
+static const uint8_t VOLT_REG_LSB=0x09;
+static const uint8_t AMP_REG_MSB=0x0E;
+static const uint8_t AMP_REG_LSB=0x0F;
 static const uint8_t COUL_REG_MSB=0x02;
 static const uint8_t COUL_REG_LSB=0x03;
-static const float DeltaQ=0.00085;
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -62,11 +64,11 @@ void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_USART2_UART_Init(void);
 static void MX_I2C1_Init(void);
-HAL_StatusTypeDef Write_Register16(uint8_t register_pointer, uint16_t register_value);
 HAL_StatusTypeDef Write_Register8(uint8_t register_pointer, uint8_t register_value);
 HAL_StatusTypeDef Read_Register(uint8_t register_pointer, uint8_t* receive_buffer,int num_reg);
 uint16_t read_register(uint8_t register_pointer);
 void SetSOC(uint8_t valMSB,uint8_t valLSB);
+uint16_t read_registerSOC(uint8_t REG_MSB, uint8_t REG_LSB);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -86,7 +88,12 @@ int main(void)
 	HAL_StatusTypeDef ret;
 	float voltage;
 	float current;
+	int32_t current_int;
 	float SOC;
+	float DeltaQ;
+	float SOCmax=17; //Ah - SOC max de la batterie
+	float SOCpart;
+	float qLSB=0.34*(50/6.08);
 	uint8_t bufRx[3];
 	uint16_t bufRx16;
 	uint8_t msg[50];
@@ -128,7 +135,7 @@ int main(void)
   	}
   	else //à partir de là on devrait avoir configurer le Control Register en Automatic Control, pour vérifer :
   	{
-  		ret=Read_Register(CTRL_REG,bufRx,2);
+  		ret=Read_Register(CTRL_REG,bufRx,2); //attention au changement ici si PB
   		if (ret!=HAL_OK)
   		{
   			strcpy((char*)msg,"Automatic Mode Set Control Error.\r\n");
@@ -141,12 +148,15 @@ int main(void)
   		}
   	}
 
-  	SetSOC(0xEF,0x44); //Valeur init à 15Ah ; Calcul : [Valeur/DeltaQ]_16 /!\ ATTENTION IL FAUT INVERSER MSB ET LSB : par exemple pour 0x44EF il faut mettre 0xEF et 0x44
+
+  	SetSOC(0x10,0x4E); //Valeur init à ...Ah ; Calcul : [Valeur/DeltaQ]_16 /!\ ATTENTION IL FAUT INVERSER MSB ET LSB : par exemple pour 0x44EF il faut mettre 0xEF et 0x44
   	HAL_Delay(500);
 
 
   	bufRx16=read_register(COUL_REG_MSB);
-  	SOC=bufRx16*DeltaQ;
+
+  	SOC=(bufRx16*qLSB)/1000.0;
+
   	sprintf((char*)msg,"Init SOC=%f",SOC);
   	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
   	HAL_Delay(50);
@@ -164,39 +174,41 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-	HAL_GPIO_TogglePin(GPIOA,GPIO_PIN_5);
-
-
 	//VOLTAGE READ ->
-	bufRx16=read_register(VOLT_REG);
-	voltage=70.8*bufRx16/65535;
-
-	sprintf((char*)msg,"Voltage=%f\r\n",voltage);
+	bufRx16=read_registerSOC(VOLT_REG_MSB,VOLT_REG_LSB);
+	voltage=70.8*(bufRx16/65535.0);
+	sprintf((char*)msg,"Voltage=%f V\r\n",voltage);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
 	HAL_Delay(50);
 
 
 	//CURRENT READ ->
-	bufRx16=read_register(AMP_REG);
-	current=64*(bufRx16-32767)/(32767*5);
-	sprintf((char*)msg,"Current=%f\r\n",current);
+	bufRx16=read_registerSOC(AMP_REG_MSB,AMP_REG_LSB);
+	current=64.0*((float)(bufRx16-32767)/(float)(32767*6.08));
+	//current=(current^2)^0.5;
+	sprintf((char*)msg,"Current=%f A\r\n",current);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
 	HAL_Delay(50);
 
 
 	//SOC
-	bufRx16=read_register(COUL_REG_MSB);
-	SOC=bufRx16*DeltaQ;
-	sprintf((char*)msg,"SOC=%f",SOC);
+	bufRx16=read_registerSOC(COUL_REG_MSB,COUL_REG_LSB); //A TESTER - attention ce n'est pas la même dans l'init
+
+	//DeltaQ=(bufRx16-0x4E10)*qLSB; //(ACR-qOffset)*qLSB;
+	SOC=(bufRx16*qLSB)/1000.0;
+
+	sprintf((char*)msg,"SOC=%f Ah (/%f Ah)\r\n",SOC,SOCmax);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
 	HAL_Delay(50);
-	strcpy((char*)msg," Ah\r\n");
+	//calcul SOC pourcentage
+	SOCpart=100*SOC/SOCmax;
+	sprintf((char*)msg,"SOC=%f %% \r\n\n",SOCpart);
 	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
 	HAL_Delay(50);
 
-	strcpy((char*)msg,"\r\n");
-	HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
-	HAL_Delay(500);
+
+
+	HAL_Delay(2000);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -216,7 +228,7 @@ void SetSOC(uint8_t valMSB,uint8_t valLSB)
 	if (ret==HAL_OK)
 	{
 		HAL_Delay(100);
-		ret=Write_Register8(COUL_REG_MSB,valMSB);
+		Write_Register8(COUL_REG_MSB,valMSB);
 		ret=Write_Register8(COUL_REG_LSB,valLSB);
 		if (ret==HAL_OK)
 		{
@@ -247,17 +259,6 @@ void SetSOC(uint8_t valMSB,uint8_t valLSB)
 	}
 }
 
-//A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL
-HAL_StatusTypeDef Write_Register16(uint8_t register_pointer, uint16_t register_value) //A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL
-{
-	uint8_t data[3];
-	data[0]=register_pointer;
-	data[1]=register_value>>8;
-	data[2]=register_value;
-
-	return HAL_I2C_Master_Transmit(&hi2c1,GAUGE_ADDR,data,3,HAL_MAX_DELAY);
-}
-
 
 HAL_StatusTypeDef Write_Register8(uint8_t register_pointer, uint8_t register_value)
 {
@@ -268,7 +269,7 @@ HAL_StatusTypeDef Write_Register8(uint8_t register_pointer, uint8_t register_val
 	return HAL_I2C_Master_Transmit(&hi2c1,GAUGE_ADDR,data,2,HAL_MAX_DELAY);
 }
 
-//A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL
+//A retirer - NE PAS PRENDRE EN COMPTE POUR LE CODE FINAL - pourquoi pas le faire en deux fois ?
 HAL_StatusTypeDef Read_Register(uint8_t register_pointer, uint8_t* receive_buffer,int num_reg) //num_reg est le nombre d'octet à récupérer (généralement 1 ou 2)
 {
 	HAL_I2C_Master_Transmit(&hi2c1, GAUGE_ADDR, &register_pointer,1,HAL_MAX_DELAY);
@@ -290,6 +291,32 @@ uint16_t read_register(uint8_t register_pointer)
 	}
 	return return_value;
 }
+
+
+uint16_t read_registerSOC(uint8_t REG_MSB, uint8_t REG_LSB)
+{
+	HAL_StatusTypeDef ret;
+	uint16_t retMSB,retLSB;
+	uint8_t msg[20];
+
+	ret=HAL_I2C_Mem_Read(&hi2c1,(uint16_t)GAUGE_ADDR,(uint16_t)REG_MSB,I2C_MEMADD_SIZE_8BIT,&retMSB,1,HAL_MAX_DELAY);
+	if (ret!=HAL_OK)
+	{
+		strcpy((char*)msg,"Read Error.\r\n");
+		HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	}
+	retMSB=retMSB<<8;
+
+	ret=HAL_I2C_Mem_Read(&hi2c1,(uint16_t)GAUGE_ADDR,(uint16_t)REG_LSB,I2C_MEMADD_SIZE_8BIT,&retLSB,1,HAL_MAX_DELAY);
+	if (ret!=HAL_OK)
+	{
+		strcpy((char*)msg,"Read Error.\r\n");
+		HAL_UART_Transmit(&huart2,msg,strlen((char*)msg),HAL_MAX_DELAY);
+	}
+
+	return retMSB+retLSB;
+}
+
 
 
 
